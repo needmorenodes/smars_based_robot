@@ -7,14 +7,13 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
+#include <Adafruit_INA260.h>
+
+Adafruit_INA260 ina260 = Adafruit_INA260();
+
 #define SCREEN_WIDTH 128  // OLED display width, in pixels
 #define SCREEN_HEIGHT 32  // OLED display height, in pixels
 
-// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
-// The pins for I2C are defined by the Wire-library.
-// On an arduino UNO:       A4(SDA), A5(SCL)
-// On an arduino MEGA 2560: 20(SDA), 21(SCL)
-// On an arduino LEONARDO:   2(SDA),  3(SCL), ...
 #define OLED_RESET -1        // Reset pin # (or -1 if sharing Arduino reset pin)
 #define SCREEN_ADDRESS 0x3C  ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
@@ -36,7 +35,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define MOTOR_B_IA HG7881_B_IA
 #define MOTOR_B_IB HG7881_B_IB
 
-#define DIR_DELAY 1000  // brief delay for abrupt motor changes
+#define RESET_TIMEOUT 250  // brief delay for abrupt motor changes
 
 const byte thisSlaveAddress[5] = { 'R', 'x', 'A', 'A', 'A' };
 
@@ -44,8 +43,11 @@ RF24 radio(CE_PIN, CSN_PIN);
 
 // SMARS_Motor_Control motorControl(MOTOR_A_IA, MOTOR_A_IB, MOTOR_B_IA, MOTOR_B_IB);
 
-char dataReceived[10];  // this must match dataToSend in the TX
 bool newData = false;
+
+bool noData = false;
+
+bool lastReply = millis();
 
 // Max size of this struct is 32 bytes - NRF24L01 buffer limit
 struct Data_Package {
@@ -81,6 +83,24 @@ int xMap, yMap;
 bool forward = true;
 bool left = true;
 
+unsigned long currentMillis;
+unsigned long lastRecievedMillis;
+
+struct Ack_Package {
+  float current;
+  float voltage;
+};
+Ack_Package ackDataPackage;  //Create a variable with the above structure
+
+// char ackData[16];
+float current = 0.0f;
+char currentChar[8];
+float maxCurrent = 0.0f;
+char maxCurrentChar[8];
+float voltage = 0.0f;
+char voltageChar[8];
+
+
 //===========
 
 void setup() {
@@ -88,20 +108,23 @@ void setup() {
   Serial.begin(9600);
   data.key = 0;
   // Set initial default values
-  data.j1PotX = 127;  // Values from 0 to 255. When Joystick is in resting position, the value is in the middle, or 127. We actually map the pot value from 0 to 1023 to 0 to 255 because that's one BYTE value
+  data.j1PotX = 127;  // Values from 0 to 255. When Joystick is in resting position, the value is in the middle, or 127.
   data.j1PotY = 127;
   data.j2PotX = 127;
   data.j2PotY = 127;
-  data.j1Button = 1;
+  data.j1Button = 1;  // Values from 1 to 0.
   data.j2Button = 1;
-  data.pot1 = 1;
+  data.pot1 = 1;  // Values from 0 to 255.
   data.pot2 = 1;
-  data.tSwitch1 = 1;
+  data.tSwitch1 = 1;  // Values from 1 to 0.
   data.tSwitch2 = 1;
-  data.button1 = 1;
+  data.button1 = 1;  // Values from 1 to 0.
   data.button2 = 1;
   data.button3 = 1;
   data.button4 = 1;
+
+  ackDataPackage.current = 0.0f;
+  ackDataPackage.voltage = 0.0f;
 
   apower.pwm = 0;
   apower.direction = 0;
@@ -118,29 +141,37 @@ void setup() {
   radio.begin();
   radio.setDataRate(RF24_250KBPS);
   radio.openReadingPipe(1, thisSlaveAddress);
+  radio.enableAckPayload();
   radio.startListening();
+  radio.writeAckPayload(1, &ackDataPackage, sizeof(ackDataPackage));  // pre-load data
 
-  Serial.println("STOP");
-  digitalWrite(MOTOR_A_IA, LOW);  // PWM speed = fast
+  // Start with Motors off
+  digitalWrite(MOTOR_A_IA, LOW);
   analogWrite(MOTOR_A_IB, 0);
-  digitalWrite(MOTOR_B_IA, LOW);  // PWM speed = fast
+  digitalWrite(MOTOR_B_IA, LOW);
   analogWrite(MOTOR_B_IB, 0);
 
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println(F("SSD1306 allocation failed"));
   }
-  display.clearDisplay();
 
+  display.clearDisplay();
   display.setTextSize(1);               // Normal 1:1 pixel scale
   display.setTextColor(SSD1306_WHITE);  // Draw white text
   display.setCursor(0, 0);              // Start at top-left corner
   display.cp437(true);                  // Use full 256 char 'Code Page 437' font
 
   display.setRotation(2);
+  if (!ina260.begin()) {
+    display.write("Couldn't find INA260 chip \n");
+    dtostrf(000.00, 6, 2, currentChar);
+  } else {
+    display.write("Found INA260 chip \n");
+  }
+
   display.write("SMARS");
   display.display();
-  // delay(2000);
 }
 
 //=============
@@ -148,34 +179,36 @@ void setup() {
 void loop() {
   getData();
   // showData();
-  if (data.tSwitch2 == 0) {
-    displayDebug();
+  updateReplyData();
+  if (noData) {
+    displayText("No Data\nRecieved!");
   } else {
-    displayText("SMARS");
+    displayDebug();
   }
-  if (data.key = 245) {
+
+  if (data.key == 245) {
     processJoystick();
     if (apower.direction == 0) {
-      digitalWrite(MOTOR_A_IA, LOW);  // PWM speed = fast
+      digitalWrite(MOTOR_A_IA, LOW);
       analogWrite(MOTOR_A_IB, apower.pwm);
     } else if (apower.direction == 1) {
       analogWrite(MOTOR_A_IA, apower.pwm);
-      digitalWrite(MOTOR_A_IB, LOW);  // PWM speed = fast
+      digitalWrite(MOTOR_A_IB, LOW);
     }
 
     if (bpower.direction == 0) {
-      digitalWrite(MOTOR_B_IA, LOW);  // PWM speed = fast
+      digitalWrite(MOTOR_B_IA, LOW);
       analogWrite(MOTOR_B_IB, bpower.pwm);
     } else if (bpower.direction == 1) {
       analogWrite(MOTOR_B_IA, bpower.pwm);
-      digitalWrite(MOTOR_B_IB, LOW);  // PWM speed = fast
+      digitalWrite(MOTOR_B_IB, LOW);
     }
 
   } else {
     Serial.println("STOP");
-    digitalWrite(MOTOR_A_IA, LOW);  // PWM speed = fast
+    digitalWrite(MOTOR_A_IA, LOW);
     analogWrite(MOTOR_A_IB, 0);
-    digitalWrite(MOTOR_B_IA, LOW);  // PWM speed = fast
+    digitalWrite(MOTOR_B_IA, LOW);
     analogWrite(MOTOR_B_IB, 0);
   }
 }
@@ -186,9 +219,15 @@ void getData() {
   if (radio.available()) {
     radio.read(&data, sizeof(data));
     newData = true;
+    lastRecievedMillis = millis();
+    noData = false;
   } else {
-    //IF LAST RECIEVED OVER 1 SECOND AGO RESET KEY
-    // displayText("No Data\nRecieved!");
+    currentMillis = millis();
+    if (currentMillis - lastRecievedMillis >= RESET_TIMEOUT) {
+      // displayText("No Data\nRecieved!");
+      noData = true;
+      resetData();
+    }
   }
 }
 
@@ -241,18 +280,26 @@ void displayDebug() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.write("DEBUG MODE\n");
-  char pwma[17];
-  sprintf(pwma, "aPWM: %03d adir: %01d", apower.pwm, apower.direction);
-  display.println(pwma);
 
-  char pwmb[17];
-  sprintf(pwma, "bPWM: %03d bdir: %01d", bpower.pwm, bpower.direction);
-  display.println(pwmb);
+  char pwm[35];
+  sprintf(pwm, "aPWM: %03d adir: %01d\nbPWM: %03d bdir: %01d", apower.pwm, apower.direction, bpower.pwm, bpower.direction);
+  display.println(pwm);
+  if (data.tSwitch1 == 0) {
+    display.print(maxCurrentChar);
+    display.print(" mA ");
+  } else {
+    display.print(currentChar);
+    display.print(" mA ");
+    display.print(voltageChar);
+    display.println(" mV");
+  }
+
   display.display();
 }
 
 void resetData() {
   // Reset the values when there is no radio connection - Set initial default values
+  data.key = 0;
   data.j1PotX = 127;
   data.j1PotY = 127;
   data.j2PotX = 127;
@@ -280,7 +327,7 @@ void processJoystick() {
     forward = false;
     yMap = map(yMap, -255, 0, 255, 0);
   }
-  if (yMap < 40) {
+  if (yMap < 60) {
     yMap = 0;
   }
 
@@ -297,14 +344,14 @@ void processJoystick() {
     xMap = 0;
   }
 
-  if(yMap == 0) {
-    if (xMap != 0 ) {
+  if (yMap == 0) {
+    if (xMap != 0) {
       if (left) {
         apower.direction = 0;
-        bpower.direction = 0;
+        bpower.direction = 1;
       } else {
         apower.direction = 1;
-        bpower.direction = 1;
+        bpower.direction = 0;
       }
       apower.pwm = xMap;
       bpower.pwm = xMap;
@@ -313,25 +360,43 @@ void processJoystick() {
       bpower.pwm = 0;
     }
   } else {
-    if (forward){
-        apower.direction = 1;
-        bpower.direction = 0;
+    if (forward) {
+      apower.direction = 0;
+      bpower.direction = 0;
     } else {
-        apower.direction = 0;
-        bpower.direction = 1;
+      apower.direction = 1;
+      bpower.direction = 1;
     }
 
-    if (xMap == 0){
+    if (xMap == 0) {
       apower.pwm = yMap;
       bpower.pwm = yMap;
     } else {
       if (left) {
-        apower.pwm = yMap - map(xMap, 0, 255, 0, yMap);
-        bpower.pwm = yMap;
-      } else {
         apower.pwm = yMap;
-        bpower.pwm = yMap - map(xMap, 0, 255, 0, yMap);
+        bpower.pwm = yMap - map(xMap, 0, 255, 60, yMap);
+      } else {
+        apower.pwm = yMap - map(xMap, 0, 255, 60, yMap);
+        bpower.pwm = yMap;
       }
     }
   }
+}
+
+void updateReplyData() {
+  current = ina260.readCurrent();
+  if (current > maxCurrent) {
+    maxCurrent = current;
+  }
+  dtostrf(maxCurrent, 6, 2, maxCurrentChar);
+  voltage = ina260.readBusVoltage();
+  dtostrf(voltage, 6, 2, voltageChar);
+
+  currentMillis = millis();
+  if (currentMillis - lastReply >= 250) {
+    lastReply = currentMillis;
+    ackDataPackage.current = current;
+    ackDataPackage.voltage = voltage;
+  }
+  radio.writeAckPayload(1, &ackDataPackage, sizeof(ackDataPackage));  // load the payload for the next time
 }

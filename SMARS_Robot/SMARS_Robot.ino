@@ -285,6 +285,7 @@ void displayDebug() {
   sprintf(pwm, "aPWM: %03d adir: %01d\nbPWM: %03d bdir: %01d", apower.pwm, apower.direction, bpower.pwm, bpower.direction);
   display.println(pwm);
   if (data.tSwitch1 == 0) {
+    display.print("Max: ");
     display.print(maxCurrentChar);
     display.print(" mA ");
   } else {
@@ -388,6 +389,7 @@ void updateReplyData() {
   if (current > maxCurrent) {
     maxCurrent = current;
   }
+  dtostrf(current, 6, 2, currentChar);
   dtostrf(maxCurrent, 6, 2, maxCurrentChar);
   voltage = ina260.readBusVoltage();
   dtostrf(voltage, 6, 2, voltageChar);

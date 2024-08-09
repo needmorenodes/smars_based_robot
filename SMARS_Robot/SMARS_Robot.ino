@@ -180,11 +180,7 @@ void loop() {
   getData();
   // showData();
   updateReplyData();
-  if (noData) {
-    displayText("No Data\nRecieved!");
-  } else {
-    displayDebug();
-  }
+  displayDebug();
 
   if (data.key == 245) {
     processJoystick();
@@ -279,7 +275,11 @@ void displayText(const char* text) {
 void displayDebug() {
   display.clearDisplay();
   display.setCursor(0, 0);
-  display.write("DEBUG MODE\n");
+  if (noData){
+    display.write("Connection Lost\n");
+  } else {
+    display.write("Connection Ack\n");
+  }
 
   char pwm[35];
   sprintf(pwm, "aPWM: %03d adir: %01d\nbPWM: %03d bdir: %01d", apower.pwm, apower.direction, bpower.pwm, bpower.direction);
